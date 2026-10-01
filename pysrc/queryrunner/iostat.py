@@ -1,5 +1,9 @@
+import logging
 import subprocess
 import psutil
+
+logger = logging.getLogger(__name__)
+
 
 class IOStat:
     def __init__(self, db: str):

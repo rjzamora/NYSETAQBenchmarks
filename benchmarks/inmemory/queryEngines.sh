@@ -22,6 +22,7 @@ Options:
   -i, --idx          (optional) Filter queries by index: single (42), list (32,42,50), or range (40-44)
   -r, --result-dir   (optional) Directory to persist merged results (default: ${RESULT_DIR})
   -q, --query-output-dir (optional) Directory to persist query outputs
+  --presorted COLS   (optional) Columns already sorted in trade/quote parquet data
   -h, --help         Show this help message
 EOF
     exit 1
@@ -38,6 +39,7 @@ while [[ $# -gt 0 ]]; do
         -i|--idx)        IDX_PARAM="-idx $2"; shift 2 ;;
         -r|--result-dir) RESULT_DIR="$2"; shift 2 ;;
         -q|--query-output-dir) QUERY_OUTPUT_DIR="$2"; shift 2 ;;
+        --presorted)     PRESORTED_PARAM="-presorted $2"; shift 2 ;;
         -h|--help)    usage ;;
         *) echo "Unknown option: $1"; usage ;;
     esac
@@ -58,7 +60,7 @@ init_benchmark
 function execute_queries () {
     mkdir -p ${RESULT_DIR}
     echo "Running Queries..."
-    local COMMONPARAMS="-date $DATADATE -storage_backend memory -querymeta ./artifacts/queries/inmemory/querymeta.psv -paramdir ${PARAM_DIR} ${IDX_PARAM}"
+    local COMMONPARAMS="-date $DATADATE -storage_backend memory -querymeta ./artifacts/queries/inmemory/querymeta.psv -paramdir ${PARAM_DIR} ${IDX_PARAM} ${PRESORTED_PARAM:-}"
     for s in "${THREAD_NRS[@]}"; do
         echo "--> Running with $s threads"
 
@@ -120,6 +122,15 @@ function execute_queries () {
             fi
             if solution_enabled "Polars (Lazy)"; then
                 run_solution "Polars (Lazy)" env POLARS_MAX_THREADS=$(( s > 1 ? s : 1 )) uv run pysrc/queryrunner/main.py ${COMMONPARAMS} -db ${DB_DIR}/parquet/rowgroup -engine polars -mode lazy -sortcols "time" -queryfile ./artifacts/queries/inmemory/polars_lazy.psv
+            fi
+            if solution_enabled "Polars (Lazy Scan)"; then
+                run_solution "Polars (Lazy Scan)" env POLARS_MAX_THREADS=$(( s > 1 ? s : 1 )) uv run pysrc/queryrunner/main.py ${COMMONPARAMS} -db ${DB_DIR}/parquet/rowgroup -engine polars -mode lazy-scan -sortcols "time" -queryfile ./artifacts/queries/inmemory/polars_lazy.psv
+            fi
+            if solution_enabled "Polars (GPU)"; then
+                run_solution "Polars (GPU)" uv run pysrc/queryrunner/main.py ${COMMONPARAMS} -db ${DB_DIR}/parquet/rowgroup -engine polars -mode lazy --gpu -sortcols "time" -queryfile ./artifacts/queries/inmemory/polars_lazy.psv
+            fi
+            if solution_enabled "Polars (GPU Scan)"; then
+                run_solution "Polars (GPU Scan)" uv run pysrc/queryrunner/main.py ${COMMONPARAMS} -db ${DB_DIR}/parquet/rowgroup -engine polars -mode lazy-scan --gpu -sortcols "time" -queryfile ./artifacts/queries/inmemory/polars_lazy.psv
             fi
         fi
         if engine_enabled pykx; then

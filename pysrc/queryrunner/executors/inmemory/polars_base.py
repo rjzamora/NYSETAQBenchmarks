@@ -14,9 +14,8 @@ setup and every query result is produced:
                                 too, except the sort, which the streaming engine
                                 has no advantage in.
 
-The tables are kept as DataFrames in self._tables regardless -- that is what the
-size and schema reported to the driver are read from -- and handed to the queries
-through _frame(), in whichever form that executor's queries expect.
+The default in-memory executors keep DataFrames in self._tables and hand them to
+the queries through _frame(), in whichever form that executor's queries expect.
 """
 import logging
 import time
@@ -41,10 +40,17 @@ class QueryExecutorPolarsBase:
     # The tables that are sorted by sort_cols.
     SORTED_TABLES: tuple[str, ...] = ("trade", "quote")
 
-    def __init__(self, param: dict[str, Any], sort_cols: str | list[str], datadate: date) -> None:
+    def __init__(
+        self,
+        param: dict[str, Any],
+        sort_cols: str | list[str],
+        datadate: date,
+        presorted_cols: list[str] | None = None,
+    ) -> None:
         self.params: dict[str, Any] = param
         self.sort_cols: str | list[str] = sort_cols
-        self._tables: dict[str, pl.DataFrame] = {}
+        self.presorted_cols = presorted_cols or []
+        self._tables: dict[str, Any] = {}
         time_buckets = pl.DataFrame(
             list(self.params['timeBuckets'].items()), schema=['bucket', 'bound'])
         self.params['timeBuckets'] = time_buckets.with_columns(pl.col('bound').cast(pl.Duration('ns')))
@@ -72,18 +78,25 @@ class QueryExecutorPolarsBase:
         """How a table is handed to the queries: as it is, or lazily."""
         raise NotImplementedError
 
+    def _mark_sorted(self, frame):
+        """Attach sortedness metadata when the executor can represent it."""
+        if not self.presorted_cols or not hasattr(frame, "set_sorted"):
+            return frame
+        return frame.set_sorted(self.presorted_cols)
+
     def _collect(self, res):
         """Bring a query's result into the form the driver reads it in."""
         return res
 
     @staticmethod
-    def _timed(ios, step) -> tuple[int, int]:
+    def _timed(ios, step) -> tuple[int, int | None]:
         """Run a load step and return its elapsed time in ns and its IO in KB."""
         io_start = ios.get_io_stat()
         t_start = time.perf_counter_ns()
         step()
         t_end = time.perf_counter_ns()
-        return t_end - t_start, ios.get_io_stat() - io_start
+        io_end = ios.get_io_stat()
+        return t_end - t_start, None if io_start is None or io_end is None else io_end - io_start
 
     def _tables_size_kb(self) -> int:
         """Total size of the loaded tables, as written into the setup rows."""

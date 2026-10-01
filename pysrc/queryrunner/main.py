@@ -121,7 +121,7 @@ def run_query(runner, db_path: Path, ios: IOStat, idx: str, tags: set, query: st
     Runs a specific query 3 times (Cold, Warm, Warm) and records timing.
     """
     times: list[float] = []
-    iostats: list[float] = []
+    iostats: list[float | None] = []
     params = runner.get_parameters(query, parameter)
     for runidx in range(3):
         iteration_label = "Cold" if runidx == 0 else f"Warm-{runidx}"
@@ -147,7 +147,7 @@ def run_query(runner, db_path: Path, ios: IOStat, idx: str, tags: set, query: st
         ressize_kb = runner.get_table_size(res)
         del res
         times.append(t_end - t_start)
-        iostats.append(io_end - io_start)
+        iostats.append(None if io_start is None or io_end is None else io_end - io_start)
 
     return QueryResult(query, "success", *times, *iostats, ressize_kb)
 
@@ -172,14 +172,42 @@ def main(args: argparse.Namespace) -> None:
             import polars as pl
             if len(args.indexon) > 0:
                 raise ValueError("Polars does not support indices")
+            query_engine = pl.GPUEngine(raise_on_fail=True) if args.gpu else "streaming"
             if args.mode == "lazy":
                 from executors.inmemory.polars_lazy_streaming import QueryExecutorPolarsLazy
-                runner = QueryExecutorPolarsLazy(params, sort_cols=args.sortcols, datadate=args.date)
+                runner = QueryExecutorPolarsLazy(
+                    params,
+                    sort_cols=args.sortcols,
+                    datadate=args.date,
+                    presorted_cols=args.presorted,
+                    query_engine=query_engine,
+                    scan_categoricals_as_string=args.gpu,
+                    transform_sym_to_categorical=not args.gpu,
+                )
+            elif args.mode == "lazy-scan":
+                from executors.inmemory.polars_lazy_streaming import QueryExecutorPolarsLazyScan
+                runner = QueryExecutorPolarsLazyScan(
+                    params,
+                    sort_cols=args.sortcols,
+                    datadate=args.date,
+                    presorted_cols=args.presorted,
+                    query_engine=query_engine,
+                    scan_categoricals_as_string=args.gpu,
+                    transform_sym_to_categorical=False,
+                )
             elif args.mode == "eager":
+                if args.gpu:
+                    raise ValueError("Polars eager mode does not support --gpu")
+                if args.presorted:
+                    raise ValueError("Polars eager mode does not support -presorted")
                 from executors.inmemory.polars_eager import QueryExecutorPolarsEager
-                runner = QueryExecutorPolarsEager(params, sort_cols=args.sortcols, datadate=args.date)
+                runner = QueryExecutorPolarsEager(
+                    params,
+                    sort_cols=args.sortcols,
+                    datadate=args.date,
+                )
             else:
-                raise ValueError("Polars engine requires -mode to be specified as either 'eager' or 'lazy'")
+                raise ValueError("Polars engine requires -mode to be specified as 'eager', 'lazy', or 'lazy-scan'")
             threadnr = pl.thread_pool_size()
         elif engine == "duckdb_con":
             from executors.inmemory.duckdb_con import QueryExecutorDuckDBCon
@@ -329,8 +357,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('-engine', type=str, choices=["polars", "duckdb_con", "chdb", "chdb_pyarrow", "pykx", "pandas"],
         required=True, help="Query engine. Currently supported: polars, duckdb_con, chdb, chdb_pyarrow, pykx, and pandas")
     parser.add_argument('-sortcols', type=parse_sortcols, required=False, help="Comma-separated columns to sort trade/quote by, e.g. 'time' or 'sym,time'.")
+    parser.add_argument('-presorted', type=parse_sortcols, default=[], help="Comma-separated columns that are already sorted in trade/quote parquet data, e.g. 'time'.")
     parser.add_argument('-indexon', type=parse_sortcols, required=False, default=[], help="Comma-separated columns to add index to, e.g. 'sym' or 'sym,ex'.")
-    parser.add_argument('-mode', type=str, required=False, choices=["eager", "lazy"], help="Execution mode for the query engine. Currently supported: eager and lazy. Only applicable to Polars engine.")
+    parser.add_argument('-mode', type=str, required=False, choices=["eager", "lazy", "lazy-scan"], help="Execution mode for the query engine. Currently supported: eager, lazy, and lazy-scan. Only applicable to Polars engine.")
+    parser.add_argument('--gpu', action='store_true', help="Collect Polars lazy queries with the GPU engine. Only valid with -mode lazy or -mode lazy-scan.")
     parser.add_argument('-queryfile', type=Path, required=True, help="PSV file containing queries")
     parser.add_argument('-querymeta', type=Path, required=True, help="PSV file containing the query metas")
     parser.add_argument('-paramdir', type=Path, required=True, help="Directory containing parameter txt files")
@@ -353,8 +383,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 if __name__ == '__main__':
+    args = build_parser().parse_args()
     if os.getenv('FLUSH') is None:
         logger.error("Environment variable FLUSH is not set. Maybe config/queryenv was not loaded.")
         sys.exit(2)
-
-    main(build_parser().parse_args())
+    main(args)
