@@ -29,6 +29,7 @@ class QueryExecutorPolarsLazy(QueryExecutorPolarsBase):
     ) -> None:
         super().__init__(*args, **kwargs)
         self.query_engine = query_engine
+        self.eval_context["query_engine"] = query_engine
         self.scan_categoricals_as_string = scan_categoricals_as_string
         self.transform_sym_to_categorical = transform_sym_to_categorical
 
